@@ -13,14 +13,21 @@ def normalizar_nombre(nombre):
 
 def cargar_datos():
     if not os.path.exists(DB_FILE):
-        st.error("No se encontró 'inventario_maquillaje.xlsx'. Ejecuta primero 'migrar_datos.py'.")
-        st.stop()
+        # Si no existe el archivo, crear la estructura base limpia
+        df_prod = pd.DataFrame(columns=['ID', 'MARCA', 'PRODUCTO', 'COSTO', 'PRECIO', 'STOCK'])
+        df_vent = pd.DataFrame(columns=['ID_VENTA', 'FECHA', 'CLIENTE', 'PRODUCTO', 'CANTIDAD', 'VALOR_UNITARIO', 'TOTAL', 'ESTADO'])
+        df_comp = pd.DataFrame(columns=['ID_COMPRA', 'FECHA', 'PRODUCTO', 'CANTIDAD', 'COSTO_TOTAL'])
+        with pd.ExcelWriter(DB_FILE) as writer:
+            df_prod.to_excel(writer, sheet_name='PRODUCTOS', index=False)
+            df_vent.to_excel(writer, sheet_name='VENTAS', index=False)
+            df_comp.to_excel(writer, sheet_name='COMPRAS', index=False)
+
     productos = pd.read_excel(DB_FILE, sheet_name='PRODUCTOS')
     ventas = pd.read_excel(DB_FILE, sheet_name='VENTAS')
     compras = pd.read_excel(DB_FILE, sheet_name='COMPRAS')
     
-    # Asegurar que los nombres existentes estén normalizados
-    if 'CLIENTE' in ventas.columns:
+    # Asegurar que los nombres existentes en ventas estén unificados
+    if 'CLIENTE' in ventas.columns and not ventas.empty:
         ventas['CLIENTE'] = ventas['CLIENTE'].apply(normalizar_nombre)
         
     return productos, ventas, compras
@@ -31,10 +38,19 @@ def guardar_datos(productos, ventas, compras):
         ventas.to_excel(writer, sheet_name='VENTAS', index=False)
         compras.to_excel(writer, sheet_name='COMPRAS', index=False)
 
+def generar_excel_respaldo(productos, ventas, compras):
+    """Genera un archivo Excel binario en memoria con las 3 pestañas para descargar de inmediato."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        productos.to_excel(writer, sheet_name='PRODUCTOS', index=False)
+        ventas.to_excel(writer, sheet_name='VENTAS', index=False)
+        compras.to_excel(writer, sheet_name='COMPRAS', index=False)
+    return output.getvalue()
+
 st.set_page_config(page_title="Stock Maquillaje", page_icon="💄", layout="wide")
 
-# Control de Clave de Acceso Sencilla
-PASSWORD_CORRECTA = "maquillaje2026" # Puedes cambiar esta clave
+# Control de Clave de Acceso
+PASSWORD_CORRECTA = "maquillaje2026"
 if "autenticado" not in st.session_state:
     st.session_state.autenticado = False
 
@@ -51,7 +67,7 @@ if not st.session_state.autenticado:
 
 productos, ventas, compras = cargar_datos()
 
-# Menú superior adaptable a Celular
+# Menú lateral
 opcion = st.sidebar.radio("📌 MENÚ", [
     "📊 Estado General", 
     "🛍️ Registrar Venta", 
@@ -59,6 +75,20 @@ opcion = st.sidebar.radio("📌 MENÚ", [
     "💳 Cuentas por Cobrar", 
     "📄 Reportes de Ventas"
 ])
+
+# --- SECCIÓN DE RESPALDO EN BARRA LATERAL ---
+st.sidebar.divider()
+st.sidebar.subheader("💾 Respaldo de Base de Datos")
+st.sidebar.caption("Descarga una copia actualizada de tu Excel con todos los cambios para respaldar tu información.")
+
+excel_bytes = generar_excel_respaldo(productos, ventas, compras)
+st.sidebar.download_button(
+    label="📥 Descargar Excel Actualizado",
+    data=excel_bytes,
+    file_name="inventario_maquillaje.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    use_container_width=True
+)
 
 # --- MODULO 1: ESTADO GENERAL ---
 if opcion == "📊 Estado General":
@@ -68,12 +98,13 @@ if opcion == "📊 Estado General":
     pagado = ventas[ventas['ESTADO'] == 'PAGADO']['TOTAL'].sum() if not ventas.empty else 0
     
     col1, col2, col3 = st.columns(3)
-    col1.metric("Unidades en Stock", int(productos['STOCK'].sum()))
+    col1.metric("Unidades en Stock", int(productos['STOCK'].sum()) if not productos.empty else 0)
     col2.metric("Por Cobrar (Deudas)", f"${pendientes:,.0f}")
     col3.metric("Ventas Cobradas", f"${pagado:,.0f}")
     
     st.subheader("📦 Stock de Productos")
-    filtro_marca = st.selectbox("Filtrar por Marca (Opcional)", ["TODAS"] + list(productos['MARCA'].unique()))
+    marcas_unicas = list(productos['MARCA'].dropna().unique()) if not productos.empty else []
+    filtro_marca = st.selectbox("Filtrar por Marca (Opcional)", ["TODAS"] + marcas_unicas)
     df_ver = productos if filtro_marca == "TODAS" else productos[productos['MARCA'] == filtro_marca]
     st.dataframe(df_ver[['MARCA', 'PRODUCTO', 'COSTO', 'PRECIO', 'STOCK']], use_container_width=True)
 
@@ -81,46 +112,59 @@ if opcion == "📊 Estado General":
 elif opcion == "🛍️ Registrar Venta":
     st.title("🛍️ Registrar Venta (Disminuye Stock)")
     
-    prod_lista = productos['MARCA'] + " - " + productos['PRODUCTO']
-    prod_sel = st.selectbox("Selecciona Producto", prod_lista)
-    
-    idx = prod_lista[prod_lista == prod_sel].index[0]
-    stock_actual = int(productos.loc[idx, 'STOCK'])
-    precio_sugerido = float(productos.loc[idx, 'PRECIO'])
-    
-    st.info(f" Stock disponible: **{stock_actual}** | Precio Base: **${precio_sugerido:,.0f}**")
-    
-    cliente_input = st.text_input("Nombre del Cliente")
-    cliente = normalizar_nombre(cliente_input)
-    
-    cantidad = st.number_input("Cantidad Vendida", min_value=1, value=1)
-    precio_venta = st.number_input("Precio Venta Unitario ($)", value=precio_sugerido)
-    estado = st.selectbox("Estado del Pago", ["PAGADO", "PENDIENTE"])
-    
-    if st.button("🚀 Confirmar Venta"):
-        if stock_actual < cantidad:
-            st.error("⚠️ No hay suficiente stock para esta venta.")
-        elif not cliente:
-            st.error("⚠️ Por favor escribe el nombre del cliente.")
-        else:
-            total = cantidad * precio_venta
-            # Actualizar stock
-            productos.loc[idx, 'STOCK'] -= cantidad
+    if productos.empty:
+        st.warning("⚠️ No hay productos cargados en el inventario.")
+    else:
+        # Limpiar posibles valores nulos (NaN) en MARCA o PRODUCTO para prevenir fallos
+        productos['MARCA'] = productos['MARCA'].fillna("SIN MARCA").astype(str)
+        productos['PRODUCTO'] = productos['PRODUCTO'].fillna("SIN NOMBRE").astype(str)
+        
+        prod_lista = productos['MARCA'] + " - " + productos['PRODUCTO']
+        prod_sel = st.selectbox("Selecciona Producto", prod_lista)
+        
+        # Búsqueda segura del índice para evitar IndexError
+        resultados_idx = prod_lista[prod_lista == prod_sel].index
+        if len(resultados_idx) == 0:
+            st.error("⚠️ El producto seleccionado no es válido o está incompleto.")
+            st.stop()
             
-            # Registrar venta
-            nueva_venta = {
-                'ID_VENTA': len(ventas) + 1,
-                'FECHA': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M'),
-                'CLIENTE': cliente,
-                'PRODUCTO': prod_sel,
-                'CANTIDAD': cantidad,
-                'VALOR_UNITARIO': precio_venta,
-                'TOTAL': total,
-                'ESTADO': estado
-            }
-            ventas = pd.concat([ventas, pd.DataFrame([nueva_venta])], ignore_index=True)
-            guardar_datos(productos, ventas, compras)
-            st.success(f"✅ Venta registrada a **{cliente}** por ${total:,.0f}. Stock actualizado.")
+        idx = resultados_idx[0]
+        stock_actual = int(productos.loc[idx, 'STOCK'])
+        precio_sugerido = float(productos.loc[idx, 'PRECIO'])
+        
+        st.info(f" Stock disponible: **{stock_actual}** | Precio Base: **${precio_sugerido:,.0f}**")
+        
+        cliente_input = st.text_input("Nombre del Cliente")
+        cliente = normalizar_nombre(cliente_input)
+        
+        cantidad = st.number_input("Cantidad Vendida", min_value=1, value=1)
+        precio_venta = st.number_input("Precio Venta Unitario ($)", value=precio_sugerido)
+        estado = st.selectbox("Estado del Pago", ["PAGADO", "PENDIENTE"])
+        
+        if st.button("🚀 Confirmar Venta"):
+            if stock_actual < cantidad:
+                st.error("⚠️ No hay suficiente stock para esta venta.")
+            elif not cliente:
+                st.error("⚠️ Por favor escribe el nombre del cliente.")
+            else:
+                total = cantidad * precio_venta
+                # Actualizar stock
+                productos.loc[idx, 'STOCK'] -= cantidad
+                
+                # Registrar venta
+                nueva_venta = {
+                    'ID_VENTA': len(ventas) + 1,
+                    'FECHA': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M'),
+                    'CLIENTE': cliente,
+                    'PRODUCTO': prod_sel,
+                    'CANTIDAD': cantidad,
+                    'VALOR_UNITARIO': precio_venta,
+                    'TOTAL': total,
+                    'ESTADO': estado
+                }
+                ventas = pd.concat([ventas, pd.DataFrame([nueva_venta])], ignore_index=True)
+                guardar_datos(productos, ventas, compras)
+                st.success(f"✅ Venta registrada a **{cliente}** por ${total:,.0f}. Stock actualizado.")
 
 # --- MODULO 3: REGISTRAR COMPRA / PRODUCTO NUEVO ---
 elif opcion == "📦 Registrar Compra / Stock":
@@ -129,27 +173,33 @@ elif opcion == "📦 Registrar Compra / Stock":
     tipo = st.radio("¿Qué deseas ingresar?", ["Aumentar Stock de Producto Existente", "Crear Producto Nuevo"])
     
     if tipo == "Aumentar Stock de Producto Existente":
-        prod_lista = productos['MARCA'] + " - " + productos['PRODUCTO']
-        prod_sel = st.selectbox("Selecciona Producto a Reabastecer", prod_lista)
-        idx = prod_lista[prod_lista == prod_sel].index[0]
-        
-        cant_compra = st.number_input("Cantidad Comprada", min_value=1, value=1)
-        costo_unitario = st.number_input("Costo Unitario ($)", value=float(productos.loc[idx, 'COSTO']))
-        
-        if st.button("➕ Sumar al Stock"):
-            productos.loc[idx, 'STOCK'] += cant_compra
-            productos.loc[idx, 'COSTO'] = costo_unitario
+        if productos.empty:
+            st.warning("⚠️ No hay productos para reabastecer.")
+        else:
+            productos['MARCA'] = productos['MARCA'].fillna("SIN MARCA").astype(str)
+            productos['PRODUCTO'] = productos['PRODUCTO'].fillna("SIN NOMBRE").astype(str)
             
-            nueva_compra = {
-                'ID_COMPRA': len(compras) + 1,
-                'FECHA': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M'),
-                'PRODUCTO': prod_sel,
-                'CANTIDAD': cant_compra,
-                'COSTO_TOTAL': cant_compra * costo_unitario
-            }
-            compras = pd.concat([compras, pd.DataFrame([nueva_compra])], ignore_index=True)
-            guardar_datos(productos, ventas, compras)
-            st.success(f"✅ Se agregaron {cant_compra} unidades al stock de {prod_sel}.")
+            prod_lista = productos['MARCA'] + " - " + productos['PRODUCTO']
+            prod_sel = st.selectbox("Selecciona Producto a Reabastecer", prod_lista)
+            idx = prod_lista[prod_lista == prod_sel].index[0]
+            
+            cant_compra = st.number_input("Cantidad Comprada", min_value=1, value=1)
+            costo_unitario = st.number_input("Costo Unitario ($)", value=float(productos.loc[idx, 'COSTO']))
+            
+            if st.button("➕ Sumar al Stock"):
+                productos.loc[idx, 'STOCK'] += cant_compra
+                productos.loc[idx, 'COSTO'] = costo_unitario
+                
+                nueva_compra = {
+                    'ID_COMPRA': len(compras) + 1,
+                    'FECHA': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M'),
+                    'PRODUCTO': prod_sel,
+                    'CANTIDAD': cant_compra,
+                    'COSTO_TOTAL': cant_compra * costo_unitario
+                }
+                compras = pd.concat([compras, pd.DataFrame([nueva_compra])], ignore_index=True)
+                guardar_datos(productos, ventas, compras)
+                st.success(f"✅ Se agregaron {cant_compra} unidades al stock de {prod_sel}.")
 
     else:
         nueva_marca = st.text_input("Marca").strip().upper()
@@ -184,7 +234,7 @@ elif opcion == "💳 Cuentas por Cobrar":
         st.balloons()
         st.success("🎉 ¡No hay deudas pendientes por cobrar!")
     else:
-        clientes_deudores = sorted(pendientes_df['CLIENTE'].unique())
+        clientes_deudores = sorted(pendientes_df['CLIENTE'].dropna().unique())
         cliente_sel = st.selectbox("Selecciona un Cliente para ver su deuda", clientes_deudores)
         
         compras_cliente = pendientes_df[pendientes_df['CLIENTE'] == cliente_sel]
@@ -193,7 +243,7 @@ elif opcion == "💳 Cuentas por Cobrar":
         st.warning(f"📌 Deuda Total de **{cliente_sel}**: **${total_deuda:,.0f}**")
         st.dataframe(compras_cliente[['ID_VENTA', 'FECHA', 'PRODUCTO', 'CANTIDAD', 'VALOR_UNITARIO', 'TOTAL']], use_container_width=True)
         
-        tab1, tab2 = st.tabs(["💵 Registrar Abono Extraordinario", "✅ Salder Deuda Completa"])
+        tab1, tab2 = st.tabs(["💵 Registrar Abono Extraordinario", "✅ Saldar Deuda Completa"])
         
         with tab1:
             st.subheader("Registrar Abono")
@@ -202,7 +252,6 @@ elif opcion == "💳 Cuentas por Cobrar":
             if st.button(f"💵 Aplicar Abono de ${monto_abono:,.0f} a {cliente_sel}"):
                 saldo_restante = monto_abono
                 
-                # Descontar el abono secuencialmente en las compras pendientes
                 indices_compras = compras_cliente.index
                 for idx in indices_compras:
                     if saldo_restante <= 0:
@@ -254,13 +303,11 @@ elif opcion == "📄 Reportes de Ventas":
         if estado_filtro != "TODOS":
             df_reporte = df_reporte[df_reporte['ESTADO'] == estado_filtro]
             
-        # Formatear columnas para visualización clara
         columnas_mostrar = ['FECHA', 'CLIENTE', 'PRODUCTO', 'VALOR_UNITARIO', 'CANTIDAD', 'TOTAL', 'ESTADO']
         
         st.subheader("📋 Lista de Ventas")
         st.dataframe(df_reporte[columnas_mostrar].rename(columns={'VALOR_UNITARIO': 'PRECIO'}), use_container_width=True)
         
-        # Generación de archivo Excel para descarga
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
             df_export = df_reporte[columnas_mostrar].rename(columns={'VALOR_UNITARIO': 'PRECIO'})
