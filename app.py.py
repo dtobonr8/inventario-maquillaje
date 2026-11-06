@@ -1,8 +1,15 @@
 import streamlit as st
 import pandas as pd
 import os
+import io
 
 DB_FILE = 'inventario_maquillaje.xlsx'
+
+def normalizar_nombre(nombre):
+    """Transforma cualquier texto escrito en mayúsculas/minúsculas a un formato unificado (Title Case)."""
+    if not nombre or pd.isna(nombre):
+        return ""
+    return " ".join(nombre.strip().split()).title()
 
 def cargar_datos():
     if not os.path.exists(DB_FILE):
@@ -11,6 +18,11 @@ def cargar_datos():
     productos = pd.read_excel(DB_FILE, sheet_name='PRODUCTOS')
     ventas = pd.read_excel(DB_FILE, sheet_name='VENTAS')
     compras = pd.read_excel(DB_FILE, sheet_name='COMPRAS')
+    
+    # Asegurar que los nombres existentes estén normalizados
+    if 'CLIENTE' in ventas.columns:
+        ventas['CLIENTE'] = ventas['CLIENTE'].apply(normalizar_nombre)
+        
     return productos, ventas, compras
 
 def guardar_datos(productos, ventas, compras):
@@ -40,7 +52,13 @@ if not st.session_state.autenticado:
 productos, ventas, compras = cargar_datos()
 
 # Menú superior adaptable a Celular
-opcion = st.sidebar.radio("📌 MENÚ", ["📊 Estado General", "🛍️ Registrar Venta", "📦 Registrar Compra / Stock", "💳 Cuentas por Cobrar"])
+opcion = st.sidebar.radio("📌 MENÚ", [
+    "📊 Estado General", 
+    "🛍️ Registrar Venta", 
+    "📦 Registrar Compra / Stock", 
+    "💳 Cuentas por Cobrar", 
+    "📄 Reportes de Ventas"
+])
 
 # --- MODULO 1: ESTADO GENERAL ---
 if opcion == "📊 Estado General":
@@ -72,7 +90,9 @@ elif opcion == "🛍️ Registrar Venta":
     
     st.info(f" Stock disponible: **{stock_actual}** | Precio Base: **${precio_sugerido:,.0f}**")
     
-    cliente = st.text_input("Nombre del Cliente").strip().upper()
+    cliente_input = st.text_input("Nombre del Cliente")
+    cliente = normalizar_nombre(cliente_input)
+    
     cantidad = st.number_input("Cantidad Vendida", min_value=1, value=1)
     precio_venta = st.number_input("Precio Venta Unitario ($)", value=precio_sugerido)
     estado = st.selectbox("Estado del Pago", ["PAGADO", "PENDIENTE"])
@@ -100,7 +120,7 @@ elif opcion == "🛍️ Registrar Venta":
             }
             ventas = pd.concat([ventas, pd.DataFrame([nueva_venta])], ignore_index=True)
             guardar_datos(productos, ventas, compras)
-            st.success(f"✅ Venta registrada a {cliente} por ${total:,.0f}. Stock actualizado.")
+            st.success(f"✅ Venta registrada a **{cliente}** por ${total:,.0f}. Stock actualizado.")
 
 # --- MODULO 3: REGISTRAR COMPRA / PRODUCTO NUEVO ---
 elif opcion == "📦 Registrar Compra / Stock":
@@ -156,7 +176,7 @@ elif opcion == "📦 Registrar Compra / Stock":
 
 # --- MODULO 4: CUENTAS POR COBRAR ---
 elif opcion == "💳 Cuentas por Cobrar":
-    st.title("💳 Control de Deudores y Cobros")
+    st.title("💳 Control de Deudores, Cobros y Abonos")
     
     pendientes_df = ventas[ventas['ESTADO'] == 'PENDIENTE']
     
@@ -164,17 +184,91 @@ elif opcion == "💳 Cuentas por Cobrar":
         st.balloons()
         st.success("🎉 ¡No hay deudas pendientes por cobrar!")
     else:
-        clientes_deudores = pendientes_df['CLIENTE'].unique()
+        clientes_deudores = sorted(pendientes_df['CLIENTE'].unique())
         cliente_sel = st.selectbox("Selecciona un Cliente para ver su deuda", clientes_deudores)
         
         compras_cliente = pendientes_df[pendientes_df['CLIENTE'] == cliente_sel]
         total_deuda = compras_cliente['TOTAL'].sum()
         
         st.warning(f"📌 Deuda Total de **{cliente_sel}**: **${total_deuda:,.0f}**")
-        st.dataframe(compras_cliente[['FECHA', 'PRODUCTO', 'CANTIDAD', 'TOTAL']], use_container_width=True)
+        st.dataframe(compras_cliente[['ID_VENTA', 'FECHA', 'PRODUCTO', 'CANTIDAD', 'VALOR_UNITARIO', 'TOTAL']], use_container_width=True)
         
-        if st.button(f"✅ Marcar TODAS las compras de {cliente_sel} como PAGADAS"):
-            ventas.loc[ventas['CLIENTE'] == cliente_sel, 'ESTADO'] = 'PAGADO'
-            guardar_datos(productos, ventas, compras)
-            st.success(f"🎉 ¡Toda la deuda de {cliente_sel} ha sido saldada!")
-            st.rerun()
+        tab1, tab2 = st.tabs(["💵 Registrar Abono Extraordinario", "✅ Salder Deuda Completa"])
+        
+        with tab1:
+            st.subheader("Registrar Abono")
+            monto_abono = st.number_input("Monto abonado ($)", min_value=1.0, max_value=float(total_deuda), value=min(10000.0, float(total_deuda)), step=1000.0)
+            
+            if st.button(f"💵 Aplicar Abono de ${monto_abono:,.0f} a {cliente_sel}"):
+                saldo_restante = monto_abono
+                
+                # Descontar el abono secuencialmente en las compras pendientes
+                indices_compras = compras_cliente.index
+                for idx in indices_compras:
+                    if saldo_restante <= 0:
+                        break
+                    monto_pendiente_compra = ventas.loc[idx, 'TOTAL']
+                    
+                    if saldo_restante >= monto_pendiente_compra:
+                        saldo_restante -= monto_pendiente_compra
+                        ventas.loc[idx, 'TOTAL'] = 0
+                        ventas.loc[idx, 'ESTADO'] = 'PAGADO'
+                    else:
+                        ventas.loc[idx, 'TOTAL'] -= saldo_restante
+                        saldo_restante = 0
+                
+                guardar_datos(productos, ventas, compras)
+                st.success(f"✅ Se registraron ${monto_abono:,.0f} de abono a {cliente_sel}.")
+                st.rerun()
+
+        with tab2:
+            st.subheader("Saldar Totalidad")
+            if st.button(f"✅ Marcar TODAS las compras de {cliente_sel} como PAGADAS"):
+                ventas.loc[ventas['CLIENTE'] == cliente_sel, 'ESTADO'] = 'PAGADO'
+                guardar_datos(productos, ventas, compras)
+                st.success(f"🎉 ¡Toda la deuda de {cliente_sel} ha sido saldada!")
+                st.rerun()
+
+# --- MODULO 5: REPORTES DE VENTAS ---
+elif opcion == "📄 Reportes de Ventas":
+    st.title("📄 Reporte y Exportación de Ventas")
+    
+    if ventas.empty:
+        st.info("Aún no existen ventas registradas.")
+    else:
+        st.subheader("🔍 Filtros de Búsqueda")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            todos_clientes = ["TODOS"] + sorted(list(ventas['CLIENTE'].dropna().unique()))
+            cliente_filtro = st.selectbox("Filtrar por Cliente", todos_clientes)
+        
+        with col2:
+            estado_filtro = st.selectbox("Filtrar por Estado", ["TODOS", "PAGADO", "PENDIENTE"])
+            
+        df_reporte = ventas.copy()
+        
+        if cliente_filtro != "TODOS":
+            df_reporte = df_reporte[df_reporte['CLIENTE'] == cliente_filtro]
+            
+        if estado_filtro != "TODOS":
+            df_reporte = df_reporte[df_reporte['ESTADO'] == estado_filtro]
+            
+        # Formatear columnas para visualización clara
+        columnas_mostrar = ['FECHA', 'CLIENTE', 'PRODUCTO', 'VALOR_UNITARIO', 'CANTIDAD', 'TOTAL', 'ESTADO']
+        
+        st.subheader("📋 Lista de Ventas")
+        st.dataframe(df_reporte[columnas_mostrar].rename(columns={'VALOR_UNITARIO': 'PRECIO'}), use_container_width=True)
+        
+        # Generación de archivo Excel para descarga
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df_export = df_reporte[columnas_mostrar].rename(columns={'VALOR_UNITARIO': 'PRECIO'})
+            df_export.to_excel(writer, sheet_name='REPORTE_VENTAS', index=False)
+            
+        st.download_button(
+            label="📥 Descargar Reporte de Ventas en Excel",
+            data=buffer.getvalue(),
+            file_name=f"reporte_ventas_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
