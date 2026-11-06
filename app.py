@@ -1,180 +1,230 @@
 import streamlit as st
 import pandas as pd
+import json
 import os
+from datetime import datetime, date
 
-DB_FILE = 'inventario_maquillaje.xlsx'
+# Configuración de la página
+st.set_page_config(
+    page_title="Gestión de Ventas y Abonos - Maquillaje",
+    page_icon="💄",
+    layout="wide"
+)
 
+DATA_FILE = "maquillaje_data.json"
+
+# Cargar y Guardar Datos
 def cargar_datos():
-    if not os.path.exists(DB_FILE):
-        st.error("No se encontró 'inventario_maquillaje.xlsx'. Ejecuta primero 'migrar_datos.py'.")
-        st.stop()
-    productos = pd.read_excel(DB_FILE, sheet_name='PRODUCTOS')
-    ventas = pd.read_excel(DB_FILE, sheet_name='VENTAS')
-    compras = pd.read_excel(DB_FILE, sheet_name='COMPRAS')
-    return productos, ventas, compras
+    estructura_base = {
+        "clientes": [],
+        "ventas_credito": [],
+        "abonos": []
+    }
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r") as f:
+                datos = json.load(f)
+                for key in estructura_base:
+                    if key not in datos:
+                        datos[key] = estructura_base[key]
+                return datos
+        except:
+            return estructura_base
+    return estructura_base
 
-def guardar_datos(productos, ventas, compras):
-    with pd.ExcelWriter(DB_FILE) as writer:
-        productos.to_excel(writer, sheet_name='PRODUCTOS', index=False)
-        ventas.to_excel(writer, sheet_name='VENTAS', index=False)
-        compras.to_excel(writer, sheet_name='COMPRAS', index=False)
+def guardar_datos(datos):
+    with open(DATA_FILE, "w") as f:
+        json.dump(datos, f, indent=4)
 
-st.set_page_config(page_title="Stock Maquillaje", page_icon="💄", layout="wide")
+datos = cargar_datos()
 
-# Control de Clave de Acceso Sencilla
-PASSWORD_CORRECTA = "maquillaje2026" # Puedes cambiar esta clave
-if "autenticado" not in st.session_state:
-    st.session_state.autenticado = False
+st.title("💄 Sistema de Control de Maquillaje: Ventas y Abonos")
+st.caption("Administra clientes, cuentas por cobrar, abonos parciales y saldos pendientes.")
 
-if not st.session_state.autenticado:
-    st.title("🔐 Acceso al Sistema de Maquillaje")
-    clave = st.text_input("Ingresa la clave de acceso:", type="password")
-    if st.button("Entrar"):
-        if clave == PASSWORD_CORRECTA:
-            st.session_state.autenticado = True
-            st.rerun()
-        else:
-            st.error("Clave incorrecta")
-    st.stop()
+# Navegación
+opcion = st.sidebar.radio(
+    "Navegación",
+    [
+        "👥 Clientes", 
+        "🛍️ Registrar Venta / Crédito", 
+        "💵 Registrar Abono", 
+        "📊 Estado de Cuentas (Sábana)"
+    ]
+)
 
-productos, ventas, compras = cargar_datos()
-
-# Menú superior adaptable a Celular
-opcion = st.sidebar.radio("📌 MENÚ", ["📊 Estado General", "🛍️ Registrar Venta", "📦 Registrar Compra / Stock", "💳 Cuentas por Cobrar"])
-
-# --- MODULO 1: ESTADO GENERAL ---
-if opcion == "📊 Estado General":
-    st.title("💄 Resumen de Inventario y Ventas")
+# ----------------------------------------------------
+# 1. MÓDULO DE CLIENTES
+# ----------------------------------------------------
+if opcion == "👥 Clientes":
+    st.header("👥 Gestión de Clientes")
     
-    pendientes = ventas[ventas['ESTADO'] == 'PENDIENTE']['TOTAL'].sum() if not ventas.empty else 0
-    pagado = ventas[ventas['ESTADO'] == 'PAGADO']['TOTAL'].sum() if not ventas.empty else 0
-    
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Unidades en Stock", int(productos['STOCK'].sum()))
-    col2.metric("Por Cobrar (Deudas)", f"${pendientes:,.0f}")
-    col3.metric("Ventas Cobradas", f"${pagado:,.0f}")
-    
-    st.subheader("📦 Stock de Productos")
-    filtro_marca = st.selectbox("Filtrar por Marca (Opcional)", ["TODAS"] + list(productos['MARCA'].unique()))
-    df_ver = productos if filtro_marca == "TODAS" else productos[productos['MARCA'] == filtro_marca]
-    st.dataframe(df_ver[['MARCA', 'PRODUCTO', 'COSTO', 'PRECIO', 'STOCK']], use_container_width=True)
-
-# --- MODULO 2: REGISTRAR VENTA ---
-elif opcion == "🛍️ Registrar Venta":
-    st.title("🛍️ Registrar Venta (Disminuye Stock)")
-    
-    prod_lista = productos['MARCA'] + " - " + productos['PRODUCTO']
-    prod_sel = st.selectbox("Selecciona Producto", prod_lista)
-    
-    idx = prod_lista[prod_lista == prod_sel].index[0]
-    stock_actual = int(productos.loc[idx, 'STOCK'])
-    precio_sugerido = float(productos.loc[idx, 'PRECIO'])
-    
-    st.info(f" Stock disponible: **{stock_actual}** | Precio Base: **${precio_sugerido:,.0f}**")
-    
-    cliente = st.text_input("Nombre del Cliente").strip().upper()
-    cantidad = st.number_input("Cantidad Vendida", min_value=1, value=1)
-    precio_venta = st.number_input("Precio Venta Unitario ($)", value=precio_sugerido)
-    estado = st.selectbox("Estado del Pago", ["PAGADO", "PENDIENTE"])
-    
-    if st.button("🚀 Confirmar Venta"):
-        if stock_actual < cantidad:
-            st.error("⚠️ No hay suficiente stock para esta venta.")
-        elif not cliente:
-            st.error("⚠️ Por favor escribe el nombre del cliente.")
-        else:
-            total = cantidad * precio_venta
-            # Actualizar stock
-            productos.loc[idx, 'STOCK'] -= cantidad
-            
-            # Registrar venta
-            nueva_venta = {
-                'ID_VENTA': len(ventas) + 1,
-                'FECHA': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M'),
-                'CLIENTE': cliente,
-                'PRODUCTO': prod_sel,
-                'CANTIDAD': cantidad,
-                'VALOR_UNITARIO': precio_venta,
-                'TOTAL': total,
-                'ESTADO': estado
-            }
-            ventas = pd.concat([ventas, pd.DataFrame([nueva_venta])], ignore_index=True)
-            guardar_datos(productos, ventas, compras)
-            st.success(f"✅ Venta registrada a {cliente} por ${total:,.0f}. Stock actualizado.")
-
-# --- MODULO 3: REGISTRAR COMPRA / PRODUCTO NUEVO ---
-elif opcion == "📦 Registrar Compra / Stock":
-    st.title("📦 Entradas de Mercancía (Aumenta Stock)")
-    
-    tipo = st.radio("¿Qué deseas ingresar?", ["Aumentar Stock de Producto Existente", "Crear Producto Nuevo"])
-    
-    if tipo == "Aumentar Stock de Producto Existente":
-        prod_lista = productos['MARCA'] + " - " + productos['PRODUCTO']
-        prod_sel = st.selectbox("Selecciona Producto a Reabastecer", prod_lista)
-        idx = prod_lista[prod_lista == prod_sel].index[0]
+    with st.form("form_cliente", clear_on_submit=True):
+        nombre = st.text_input("Nombre de la Clienta / Cliente")
+        telefono = st.text_input("Teléfono / WhatsApp")
         
-        cant_compra = st.number_input("Cantidad Comprada", min_value=1, value=1)
-        costo_unitario = st.number_input("Costo Unitario ($)", value=float(productos.loc[idx, 'COSTO']))
-        
-        if st.button("➕ Sumar al Stock"):
-            productos.loc[idx, 'STOCK'] += cant_compra
-            productos.loc[idx, 'COSTO'] = costo_unitario
-            
-            nueva_compra = {
-                'ID_COMPRA': len(compras) + 1,
-                'FECHA': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M'),
-                'PRODUCTO': prod_sel,
-                'CANTIDAD': cant_compra,
-                'COSTO_TOTAL': cant_compra * costo_unitario
-            }
-            compras = pd.concat([compras, pd.DataFrame([nueva_compra])], ignore_index=True)
-            guardar_datos(productos, ventas, compras)
-            st.success(f"✅ Se agregaron {cant_compra} unidades al stock de {prod_sel}.")
-
-    else:
-        nueva_marca = st.text_input("Marca").strip().upper()
-        nuevo_prod = st.text_input("Nombre del Producto").strip().upper()
-        nuevo_costo = st.number_input("Costo Unitario ($)", min_value=0.0, value=10000.0)
-        nuevo_precio = st.number_input("Precio Venta ($)", min_value=0.0, value=15000.0)
-        nuevo_stock = st.number_input("Stock Inicial", min_value=1, value=1)
-        
-        if st.button("✨ Guardar Nuevo Producto"):
-            if not nueva_marca or not nuevo_prod:
-                st.error("Escribe la marca y el nombre del producto.")
+        btn = st.form_submit_button("Guardar Cliente")
+        if btn:
+            if not nombre.strip():
+                st.warning("⚠️ Ingresa el nombre del cliente.")
             else:
-                nuevo_reg = {
-                    'ID': len(productos) + 1,
-                    'MARCA': nueva_marca,
-                    'PRODUCTO': nuevo_prod,
-                    'COSTO': nuevo_costo,
-                    'PRECIO': nuevo_precio,
-                    'STOCK': nuevo_stock
+                nuevo = {
+                    "id": len(datos["clientes"]) + 1,
+                    "nombre": nombre.strip(),
+                    "telefono": telefono.strip()
                 }
-                productos = pd.concat([productos, pd.DataFrame([nuevo_reg])], ignore_index=True)
-                guardar_datos(productos, ventas, compras)
-                st.success(f"✅ Producto '{nueva_marca} - {nuevo_prod}' creado con éxito.")
+                datos["clientes"].append(nuevo)
+                guardar_datos(datos)
+                st.success(f"✅ Cliente '{nombre}' registrado con éxito.")
 
-# --- MODULO 4: CUENTAS POR COBRAR ---
-elif opcion == "💳 Cuentas por Cobrar":
-    st.title("💳 Control de Deudores y Cobros")
-    
-    pendientes_df = ventas[ventas['ESTADO'] == 'PENDIENTE']
-    
-    if pendientes_df.empty:
-        st.balloons()
-        st.success("🎉 ¡No hay deudas pendientes por cobrar!")
+    st.subheader("📋 Listado de Clientes")
+    if datos["clientes"]:
+        st.dataframe(pd.DataFrame(datos["clientes"]), use_container_width=True)
     else:
-        clientes_deudores = pendientes_df['CLIENTE'].unique()
-        cliente_sel = st.selectbox("Selecciona un Cliente para ver su deuda", clientes_deudores)
+        st.info("No hay clientes registrados aún.")
+
+# ----------------------------------------------------
+# 2. MÓDULO DE REGISTRAR VENTA / CRÉDITO
+# ----------------------------------------------------
+elif opcion == "🛍️ Registrar Venta / Crédito":
+    st.header("🛍️ Registrar Venta o Cuenta por Cobrar")
+    st.caption("Registra los productos entregados y el valor total que el cliente queda debiendo.")
+
+    if not datos["clientes"]:
+        st.warning("⚠️ Primero registra clientes en la sección anterior.")
+    else:
+        clientes_dict = {f"{c['id']} - {c['nombre']}": c for c in datos["clientes"]}
         
-        compras_cliente = pendientes_df[pendientes_df['CLIENTE'] == cliente_sel]
-        total_deuda = compras_cliente['TOTAL'].sum()
+        with st.form("form_venta", clear_on_submit=True):
+            cli_sel = st.selectbox("Seleccionar Cliente", list(clientes_dict.keys()))
+            cliente_info = clientes_dict[cli_sel]
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                detalles_productos = st.text_area("Detalle de Productos (Ej. 5 labiales, 1 polvo)")
+                monto_total = st.number_input("Valor Total del Credito / Deuda ($)", min_value=1000, step=1000)
+            with col2:
+                fecha_venta = st.date_input("Fecha de la Venta", value=date.today())
+                
+            btn_v = st.form_submit_button("Registrar Venta a Crédito")
+            if btn_v:
+                venta_rec = {
+                    "id": len(datos["ventas_credito"]) + 1,
+                    "cliente_id": cliente_info["id"],
+                    "nombre_cliente": cliente_info["nombre"],
+                    "detalles": detalles_productos.strip(),
+                    "monto_total": monto_total,
+                    "fecha": str(fecha_venta)
+                }
+                datos["ventas_credito"].append(venta_rec)
+                guardar_datos(datos)
+                st.success(f"✅ Venta registrada por ${monto_total:,.0f} para {cliente_info['nombre']}.")
+
+    st.subheader("📋 Historial de Ventas y Créditos Activos")
+    if datos["ventas_credito"]:
+        st.dataframe(pd.DataFrame(datos["ventas_credito"]), use_container_width=True)
+    else:
+        st.info("No hay ventas registradas.")
+
+# ----------------------------------------------------
+# 3. MÓDULO DE REGISTRAR ABONO
+# ----------------------------------------------------
+elif opcion == "💵 Registrar Abono":
+    st.header("💵 Registrar Abono Parcial")
+    st.caption("Ingresa los abonos que hacen los clientes (ej. si debe $50.000 y abona $27.000).")
+
+    if not datos["ventas_credito"]:
+        st.warning("⚠️ No hay créditos o ventas registradas para abonar.")
+    else:
+        opciones_ventas = {}
+        for v in datos["ventas_credito"]:
+            abonos_previos = sum([a.get("monto_abono", 0) for a in datos["abonos"] if a.get("venta_id") == v["id"]])
+            saldo_pendiente = v["monto_total"] - abonos_previos
+            
+            if saldo_pendiente > 0:
+                label = f"Venta #{v['id']} - {v['nombre_cliente']} | Total: ${v['monto_total']:,.0f} | Debe Actual: ${saldo_pendiente:,.0f}"
+                opciones_ventas[label] = {"venta": v, "saldo": saldo_pendiente}
+
+        if not opciones_ventas:
+            st.success("🎉 ¡Todas las ventas registradas se encuentran totalmente pagadas!")
+        else:
+            with st.form("form_abono", clear_on_submit=True):
+                venta_sel_str = st.selectbox("Seleccionar Deuda / Venta del Cliente", list(opciones_ventas.keys()))
+                info_sel = opciones_ventas[venta_sel_str]
+                v_info = info_sel["venta"]
+                saldo_actual = info_sel["saldo"]
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    monto_abono = st.number_input("Valor del Abono de Hoy ($)", min_value=1000, max_value=float(saldo_actual), step=1000)
+                with col2:
+                    fecha_abono = st.date_input("Fecha del Abono", value=date.today())
+                    
+                nota_abono = st.text_input("Observación (Opcional)", placeholder="Ej. Abono parcial en efectivo")
+                
+                btn_ab = st.form_submit_button("Guardar Abono")
+                if btn_ab:
+                    reg_abono = {
+                        "venta_id": v_info["id"],
+                        "cliente_id": v_info["cliente_id"],
+                        "nombre_cliente": v_info["nombre_cliente"],
+                        "monto_abono": monto_abono,
+                        "fecha": str(fecha_abono),
+                        "observacion": nota_abono.strip() if nota_abono else "Abono registrado"
+                    }
+                    datos["abonos"].append(reg_abono)
+                    guardar_datos(datos)
+                    
+                    nuevo_saldo = saldo_actual - monto_abono
+                    st.success(f"✅ ¡Abono de ${monto_abono:,.0f} registrado con éxito! El nuevo saldo pendiente es de ${nuevo_saldo:,.0f}.")
+
+    st.subheader("📋 Historial de Abonos Realizados")
+    if datos["abonos"]:
+        st.dataframe(pd.DataFrame(datos["abonos"]), use_container_width=True)
+    else:
+        st.info("Aún no hay abonos registrados.")
+
+# ----------------------------------------------------
+# 4. ESTADO DE CUENTAS / SÁBANA
+# ----------------------------------------------------
+elif opcion == "📊 Estado de Cuentas (Sábana)":
+    st.header("📊 Sábana de Control de Deudores y Saldos")
+    st.caption("Resumen detallado de cuánto compró cada cliente, cuánto ha abonado y cuánto debe exactamente en tiempo real.")
+
+    if not datos["clientes"]:
+        st.warning("⚠️ No hay clientes registrados.")
+    else:
+        resumen_list = []
+        for c in datos["clientes"]:
+            ventas_cli = [v for v in datos["ventas_credito"] if v["cliente_id"] == c["id"]]
+            total_comprado = sum([v["monto_total"] for v in ventas_cli])
+            
+            abonos_cli = [a for a in datos["abonos"] if a["cliente_id"] == c["id"]]
+            total_abonado = sum([a["monto_abono"] for a in abonos_cli])
+            
+            saldo_pendiente = total_comprado - total_abonado
+            
+            resumen_list.append({
+                "ID": c["id"],
+                "Cliente": c["nombre"],
+                "Teléfono": c["telefono"],
+                "Total Deuda Inicial ($)": total_comprado,
+                "Total Abonado ($)": total_abonado,
+                "Saldo Pendiente ($)": saldo_pendiente
+            })
+            
+        df_resumen = pd.DataFrame(resumen_list)
         
-        st.warning(f"📌 Deuda Total de **{cliente_sel}**: **${total_deuda:,.0f}**")
-        st.dataframe(compras_cliente[['FECHA', 'PRODUCTO', 'CANTIDAD', 'TOTAL']], use_container_width=True)
-        
-        if st.button(f"✅ Marcar TODAS las compras de {cliente_sel} como PAGADAS"):
-            ventas.loc[ventas['CLIENTE'] == cliente_sel, 'ESTADO'] = 'PAGADO'
-            guardar_datos(productos, ventas, compras)
-            st.success(f"🎉 ¡Toda la deuda de {cliente_sel} ha sido saldada!")
-            st.rerun()
+        st.dataframe(df_resumen.style.format({
+            "Total Deuda Inicial ($)": "${:,.0f}",
+            "Total Abonado ($)": "${:,.0f}",
+            "Saldo Pendiente ($)": "${:,.0f}"
+        }), use_container_width=True)
+
+        st.divider()
+        csv_data = df_resumen.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Descargar Estado de Cuentas (CSV)",
+            data=csv_data,
+            file_name="estado_cuentas_maquillaje.csv",
+            mime="text/csv"
+        )
